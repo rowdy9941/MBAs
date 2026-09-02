@@ -194,6 +194,22 @@ class BookingCreate(BaseModel):
     drop_location: str = Field(min_length=2, max_length=500)
 
 
+class MessageCreate(BaseModel):
+    content: str = Field(min_length=1, max_length=4000)
+    language: str | None = Field(default=None, max_length=16)
+
+
+def deterministic_agent_reply(content: str, language: str | None) -> str:
+    normalized = content.lower()
+    if any(word in normalized for word in ("price", "quote", "fare", "rate")):
+        return "I can prepare a verified quote. Please share pickup, destination, travel date, time and passenger count."
+    if any(word in normalized for word in ("booking", "book", "available")):
+        return "I can help check availability. Please share pickup, destination, travel date and time."
+    if language and language.startswith("te"):
+        return "మీ ప్రయాణ వివరాలు చెప్పండి. నేను అందుబాటులో ఉన్న వాహనం మరియు ధృవీకరించిన ధరలో సహాయం చేస్తాను."
+    return "Welcome to MBAs. I can help with travel availability, verified quotes and bookings."
+
+
 RISK_LEVELS = {
     "lead.create": "green",
     "customer.create": "green",
@@ -280,6 +296,31 @@ async def create_conversation(
             current_tenant, body.business_id, body.customer_id, body.channel, body.language,
         )
     return dict(row)
+
+
+@app.get("/v1/conversations/{conversation_id}/messages", tags=["conversations"])
+async def list_messages(conversation_id: UUID, user: dict = Depends(current_user)):
+    async with tenant_connection(user) as conn:
+        rows = await conn.fetch("""SELECT id,sender_type,content,language,created_at FROM conversation_messages
+            WHERE conversation_id=$1 ORDER BY created_at""", conversation_id)
+    return [dict(row) for row in rows]
+
+
+@app.post("/v1/conversations/{conversation_id}/messages", status_code=status.HTTP_201_CREATED, tags=["conversations"])
+async def send_message(conversation_id: UUID, body: MessageCreate, user: dict = Depends(current_user)):
+    async with tenant_connection(user) as conn:
+        conversation = await conn.fetchrow("SELECT id,language FROM conversations WHERE id=$1", conversation_id)
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        language = body.language or conversation["language"]
+        customer = await conn.fetchrow("""INSERT INTO conversation_messages(tenant_id,conversation_id,sender_type,content,language)
+            VALUES($1,$2,'customer',$3,$4) RETURNING id,sender_type,content,language,created_at""",
+            user["tenant_id"], conversation_id, body.content, language)
+        reply = deterministic_agent_reply(body.content, language)
+        agent = await conn.fetchrow("""INSERT INTO conversation_messages(tenant_id,conversation_id,sender_type,content,language)
+            VALUES($1,$2,'agent',$3,$4) RETURNING id,sender_type,content,language,created_at""",
+            user["tenant_id"], conversation_id, reply, language)
+    return {"customer_message": dict(customer), "agent_message": dict(agent)}
 
 
 @app.post("/v1/actions", status_code=status.HTTP_201_CREATED, tags=["actions"])
