@@ -9,10 +9,20 @@ Start with a Hostinger KVM 8-class Ubuntu 24.04 VPS in the nearest Indian region
 1. Point `mbas.example.com` and `api.mbas.example.com` A records to the VPS.
 2. Open TCP ports 80 and 443. Do **not** expose PostgreSQL or Redis.
 3. Install Docker Engine and the Compose plugin on the VPS.
-4. Clone this repository, copy `.env.example` to `.env`, and replace all sample secrets.
+4. Clone this repository and run `MBAS_INSTALL_DIR=$PWD ./install.sh`; it creates `.env` with generated database/auth secrets. Replace domains and configure provider credentials before public use.
 5. Configure a real mailbox for Caddy's ACME certificate notices.
 
 Phase 0 stops before production deployment. Before any later approved deployment, generate unique database credentials, keep `.env` outside version control, restrict SSH, enable the host firewall and unattended security updates, arrange encrypted off-server backups, and complete the Phase 1 authentication/RLS work. The placeholder API is not safe for public business data.
+
+## One-shot install
+
+```bash
+git clone https://github.com/rowdy9941/MBAs.git
+cd MBAs
+MBAS_INSTALL_DIR=$PWD ./install.sh
+```
+
+The installer is safe to rerun. It does not overwrite an existing `.env`, pulls images, builds the application, starts the stack and verifies both liveness and database readiness.
 
 ## Start
 

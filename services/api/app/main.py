@@ -8,12 +8,13 @@ from typing import Literal
 from uuid import UUID, uuid4
 
 import asyncpg
-from fastapi import FastAPI, Header, HTTPException, Request, Response, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app.config import settings
+from app.auth import current_user, hash_password, issue_token, require_role, verify_password
 
 
 class JsonFormatter(logging.Formatter):
@@ -104,6 +105,18 @@ class ActionRequestCreate(BaseModel):
     requested_by: str = "agent:mani"
 
 
+class SignupRequest(BaseModel):
+    organization_name: str = Field(min_length=2, max_length=120)
+    name: str = Field(min_length=2, max_length=120)
+    email: str = Field(pattern=r"^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$")
+    password: str = Field(min_length=12, max_length=128)
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
 RISK_LEVELS = {
     "lead.create": "green",
     "customer.create": "green",
@@ -151,13 +164,39 @@ async def create_tenant(body: TenantCreate):
     return dict(row)
 
 
+@app.post("/v1/auth/signup", status_code=status.HTTP_201_CREATED, tags=["auth"])
+async def signup(body: SignupRequest):
+    async with app.state.pool.acquire() as conn:
+        async with conn.transaction():
+            try:
+                tenant = await conn.fetchrow("INSERT INTO tenants(name, slug) VALUES($1, $2) RETURNING id", body.organization_name, body.organization_name.lower().replace(" ", "-")[:63])
+                await conn.execute("SELECT set_config('app.tenant_id', $1, true)", str(tenant["id"]))
+                org = await conn.fetchrow("INSERT INTO organizations(tenant_id, name) VALUES($1, $2) RETURNING id", tenant["id"], body.organization_name)
+                user = await conn.fetchrow("INSERT INTO users(email, display_name, password_hash) VALUES($1, $2, $3) RETURNING id", body.email.lower(), body.name, hash_password(body.password))
+                await conn.execute("INSERT INTO memberships(organization_id, user_id, role) VALUES($1, $2, 'owner')", org["id"], user["id"])
+                await conn.execute("INSERT INTO audit_events(tenant_id, actor_type, actor_id, event_type, entity_type, entity_id) VALUES($1,'human',$2,'user.signup','user',$2)", tenant["id"], str(user["id"]))
+            except asyncpg.UniqueViolationError as error:
+                raise HTTPException(status_code=409, detail="Organization slug or email already exists") from error
+    return {"access_token": issue_token(user["id"], tenant["id"], "owner"), "token_type": "bearer", "tenant_id": tenant["id"], "user_id": user["id"]}
+
+
+@app.post("/v1/auth/login", tags=["auth"])
+async def login(body: LoginRequest):
+    async with app.state.pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM authenticate_user($1)", body.email.lower())
+    if not row or not row["password_hash"] or not verify_password(body.password, row["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    return {"access_token": issue_token(row["id"], row["tenant_id"], row["role"]), "token_type": "bearer", "tenant_id": row["tenant_id"], "user_id": row["id"]}
+
+
 @app.post("/v1/conversations", status_code=status.HTTP_201_CREATED, tags=["conversations"])
 async def create_conversation(
     body: ConversationCreate,
-    x_tenant_id: str | None = Header(default=None, alias="X-Tenant-ID"),
+    user: dict = Depends(current_user),
 ):
-    current_tenant = tenant_id(x_tenant_id)
+    current_tenant = user["tenant_id"]
     async with app.state.pool.acquire() as conn:
+        await conn.execute("SELECT set_config('app.tenant_id', $1, true), set_config('app.user_id', $2, true)", str(current_tenant), str(user["user_id"]))
         row = await conn.fetchrow(
             """INSERT INTO conversations(tenant_id, business_id, customer_id, channel, language)
                VALUES($1, $2, $3, $4, $5)
@@ -170,12 +209,13 @@ async def create_conversation(
 @app.post("/v1/actions", status_code=status.HTTP_201_CREATED, tags=["actions"])
 async def request_action(
     body: ActionRequestCreate,
-    x_tenant_id: str | None = Header(default=None, alias="X-Tenant-ID"),
+    user: dict = Depends(require_role("owner", "admin", "manager", "staff")),
 ):
-    current_tenant = tenant_id(x_tenant_id)
+    current_tenant = user["tenant_id"]
     risk_level = RISK_LEVELS.get(body.action_name, "yellow")
     action_status = "approved" if risk_level == "green" else "pending"
     async with app.state.pool.acquire() as conn:
+        await conn.execute("SELECT set_config('app.tenant_id', $1, true), set_config('app.user_id', $2, true)", str(current_tenant), str(user["user_id"]))
         async with conn.transaction():
             row = await conn.fetchrow(
                 """INSERT INTO action_requests
