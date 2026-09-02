@@ -24,6 +24,12 @@ def test_liveness_does_not_require_database():
     assert response.json()["status"] == "ok"
 
 
+def test_provider_health_does_not_expose_secrets():
+    payload = client_without_lifespan().get("/v1/provider-health").json()
+    assert payload["status"] == "ok"
+    assert set(payload["providers"]) == {"sarvam", "whatsapp", "livekit"}
+
+
 def test_correlation_id_is_preserved():
     response = client_without_lifespan().get("/healthz", headers={"X-Correlation-ID": "test-request-123"})
     assert response.headers["X-Correlation-ID"] == "test-request-123"
