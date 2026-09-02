@@ -2,9 +2,11 @@ from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
 from app.auth import current_user, hash_password, issue_token, verify_password
 from app.config import settings
+from app.main import app
 
 
 def test_password_hash_is_salted_and_verifies():
@@ -26,3 +28,9 @@ def test_invalid_token_is_rejected():
     with pytest.raises(HTTPException) as error:
         current_user("Bearer invalid.token.value")
     assert error.value.status_code == 401
+
+
+@pytest.mark.parametrize("path", ["/v1/businesses", "/v1/customers", "/v1/leads", "/v1/vehicles", "/v1/services", "/v1/quotes", "/v1/bookings"])
+def test_business_operations_require_authentication(path):
+    response = TestClient(app).post(path, json={})
+    assert response.status_code == 401

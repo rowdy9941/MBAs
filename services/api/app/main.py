@@ -63,6 +63,17 @@ app.add_middleware(
 )
 
 
+@asynccontextmanager
+async def tenant_connection(user: dict):
+    async with app.state.pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                "SELECT set_config('app.tenant_id', $1, true), set_config('app.user_id', $2, true)",
+                str(user["tenant_id"]), str(user["user_id"]),
+            )
+            yield conn
+
+
 @app.middleware("http")
 async def request_context(request: Request, call_next):
     correlation_id = request.headers.get("X-Correlation-ID") or str(uuid4())
@@ -115,6 +126,60 @@ class SignupRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: str
     password: str
+
+
+class BusinessCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    timezone: str = "Asia/Kolkata"
+
+
+class CustomerCreate(BaseModel):
+    business_id: UUID
+    display_name: str | None = Field(default=None, max_length=120)
+    phone_e164: str | None = Field(default=None, pattern=r"^\\+[1-9][0-9]{7,14}$")
+    email: str | None = None
+
+
+class LeadCreate(BaseModel):
+    business_id: UUID
+    customer_id: UUID | None = None
+    source: str = Field(default="manual", max_length=40)
+    notes: str | None = Field(default=None, max_length=2000)
+
+
+class ServiceCreate(BaseModel):
+    business_id: UUID
+    name: str = Field(min_length=2, max_length=120)
+    unit_price_paise: int = Field(ge=0)
+
+
+class VehicleCreate(BaseModel):
+    business_id: UUID
+    registration_number: str = Field(min_length=4, max_length=32)
+    vehicle_type: str = Field(min_length=2, max_length=80)
+    seats: int = Field(gt=0, le=100)
+
+
+class QuoteLineCreate(BaseModel):
+    service_id: UUID
+    quantity: int = Field(gt=0, le=1000)
+
+
+class QuoteCreate(BaseModel):
+    business_id: UUID
+    customer_id: UUID | None = None
+    lead_id: UUID | None = None
+    lines: list[QuoteLineCreate] = Field(min_length=1, max_length=50)
+
+
+class BookingCreate(BaseModel):
+    business_id: UUID
+    quote_id: UUID
+    customer_id: UUID | None = None
+    vehicle_id: UUID | None = None
+    pickup_at: datetime
+    pickup_location: str = Field(min_length=2, max_length=500)
+    drop_location: str = Field(min_length=2, max_length=500)
 
 
 RISK_LEVELS = {
@@ -186,7 +251,7 @@ async def login(body: LoginRequest):
         row = await conn.fetchrow("SELECT * FROM authenticate_user($1)", body.email.lower())
     if not row or not row["password_hash"] or not verify_password(body.password, row["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid email or password")
-    return {"access_token": issue_token(row["id"], row["tenant_id"], row["role"]), "token_type": "bearer", "tenant_id": row["tenant_id"], "user_id": row["id"]}
+    return {"access_token": issue_token(row["user_id"], row["tenant_id"], row["role"]), "token_type": "bearer", "tenant_id": row["tenant_id"], "user_id": row["user_id"]}
 
 
 @app.post("/v1/conversations", status_code=status.HTTP_201_CREATED, tags=["conversations"])
@@ -195,8 +260,7 @@ async def create_conversation(
     user: dict = Depends(current_user),
 ):
     current_tenant = user["tenant_id"]
-    async with app.state.pool.acquire() as conn:
-        await conn.execute("SELECT set_config('app.tenant_id', $1, true), set_config('app.user_id', $2, true)", str(current_tenant), str(user["user_id"]))
+    async with tenant_connection(user) as conn:
         row = await conn.fetchrow(
             """INSERT INTO conversations(tenant_id, business_id, customer_id, channel, language)
                VALUES($1, $2, $3, $4, $5)
@@ -214,26 +278,99 @@ async def request_action(
     current_tenant = user["tenant_id"]
     risk_level = RISK_LEVELS.get(body.action_name, "yellow")
     action_status = "approved" if risk_level == "green" else "pending"
-    async with app.state.pool.acquire() as conn:
-        await conn.execute("SELECT set_config('app.tenant_id', $1, true), set_config('app.user_id', $2, true)", str(current_tenant), str(user["user_id"]))
-        async with conn.transaction():
-            row = await conn.fetchrow(
-                """INSERT INTO action_requests
-                (tenant_id, business_id, conversation_id, action_name, risk_level, status, payload, requested_by)
-                VALUES($1,$2,$3,$4,$5,$6,$7,$8)
-                RETURNING id, action_name, risk_level, status, created_at""",
-                current_tenant, body.business_id, body.conversation_id, body.action_name,
-                risk_level, action_status, body.payload, body.requested_by,
-            )
-            await conn.execute(
-                """INSERT INTO audit_events(tenant_id, actor_type, actor_id, event_type, entity_type, entity_id, payload)
-                VALUES($1, 'agent', $2, 'action.requested', 'action_request', $3, $4)""",
-                current_tenant,
-                body.requested_by,
-                str(row["id"]),
-                json.dumps({"action": body.action_name, "risk": risk_level}),
-            )
+    async with tenant_connection(user) as conn:
+        row = await conn.fetchrow(
+            """INSERT INTO action_requests
+            (tenant_id, business_id, conversation_id, action_name, risk_level, status, payload, requested_by)
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8)
+            RETURNING id, action_name, risk_level, status, created_at""",
+            current_tenant, body.business_id, body.conversation_id, body.action_name,
+            risk_level, action_status, body.payload, body.requested_by,
+        )
+        await conn.execute(
+            """INSERT INTO audit_events(tenant_id, actor_type, actor_id, event_type, entity_type, entity_id, payload)
+            VALUES($1, 'agent', $2, 'action.requested', 'action_request', $3, $4)""",
+            current_tenant,
+            body.requested_by,
+            str(row["id"]),
+            json.dumps({"action": body.action_name, "risk": risk_level}),
+        )
     return {**dict(row), "requires_human_approval": risk_level != "green"}
+
+
+@app.post("/v1/businesses", status_code=status.HTTP_201_CREATED, tags=["businesses"])
+async def create_business(body: BusinessCreate, user: dict = Depends(require_role("owner", "admin"))):
+    async with tenant_connection(user) as conn:
+        row = await conn.fetchrow("""INSERT INTO businesses(tenant_id,name,timezone) VALUES($1,$2,$3)
+            RETURNING id,name,timezone,created_at""", user["tenant_id"], body.name, body.timezone)
+    return dict(row)
+
+
+@app.post("/v1/customers", status_code=status.HTTP_201_CREATED, tags=["customers"])
+async def create_customer(body: CustomerCreate, user: dict = Depends(require_role("owner", "admin", "manager", "staff"))):
+    async with tenant_connection(user) as conn:
+        row = await conn.fetchrow("""INSERT INTO customers(tenant_id,business_id,display_name,phone_e164,email)
+            VALUES($1,$2,$3,$4,$5) RETURNING id,business_id,display_name,phone_e164,email,created_at""",
+            user["tenant_id"], body.business_id, body.display_name, body.phone_e164, body.email)
+    return dict(row)
+
+
+@app.post("/v1/leads", status_code=status.HTTP_201_CREATED, tags=["leads"])
+async def create_lead(body: LeadCreate, user: dict = Depends(require_role("owner", "admin", "manager", "staff"))):
+    async with tenant_connection(user) as conn:
+        row = await conn.fetchrow("""INSERT INTO leads(tenant_id,business_id,customer_id,source,notes)
+            VALUES($1,$2,$3,$4,$5) RETURNING id,business_id,customer_id,status,source,created_at""",
+            user["tenant_id"], body.business_id, body.customer_id, body.source, body.notes)
+    return dict(row)
+
+
+@app.post("/v1/services", status_code=status.HTTP_201_CREATED, tags=["services"])
+async def create_service(body: ServiceCreate, user: dict = Depends(require_role("owner", "admin", "manager"))):
+    async with tenant_connection(user) as conn:
+        row = await conn.fetchrow("""INSERT INTO services(tenant_id,business_id,name,unit_price_paise)
+            VALUES($1,$2,$3,$4) RETURNING id,name,unit_price_paise,created_at""",
+            user["tenant_id"], body.business_id, body.name, body.unit_price_paise)
+    return dict(row)
+
+
+@app.post("/v1/vehicles", status_code=status.HTTP_201_CREATED, tags=["vehicles"])
+async def create_vehicle(body: VehicleCreate, user: dict = Depends(require_role("owner", "admin", "manager"))):
+    async with tenant_connection(user) as conn:
+        row = await conn.fetchrow("""INSERT INTO vehicles(tenant_id,business_id,registration_number,vehicle_type,seats)
+            VALUES($1,$2,$3,$4,$5) RETURNING id,registration_number,vehicle_type,seats,status,created_at""",
+            user["tenant_id"], body.business_id, body.registration_number.upper(), body.vehicle_type, body.seats)
+    return dict(row)
+
+
+@app.post("/v1/quotes", status_code=status.HTTP_201_CREATED, tags=["quotes"])
+async def create_quote(body: QuoteCreate, user: dict = Depends(require_role("owner", "admin", "manager", "staff"))):
+    async with tenant_connection(user) as conn:
+        services = []
+        for line in body.lines:
+            service = await conn.fetchrow("SELECT id,name,unit_price_paise FROM services WHERE id=$1 AND business_id=$2 AND active", line.service_id, body.business_id)
+            if not service:
+                raise HTTPException(status_code=422, detail="Quote includes an unavailable service")
+            services.append((service, line.quantity))
+        total = sum(service["unit_price_paise"] * quantity for service, quantity in services)
+        quote = await conn.fetchrow("""INSERT INTO quotes(tenant_id,business_id,customer_id,lead_id,total_paise)
+            VALUES($1,$2,$3,$4,$5) RETURNING id,status,total_paise,currency,created_at""",
+            user["tenant_id"], body.business_id, body.customer_id, body.lead_id, total)
+        for service, quantity in services:
+            await conn.execute("""INSERT INTO quote_lines(quote_id,service_id,description,quantity,unit_price_paise,line_total_paise)
+                VALUES($1,$2,$3,$4,$5,$6)""", quote["id"], service["id"], service["name"], quantity, service["unit_price_paise"], service["unit_price_paise"] * quantity)
+    return dict(quote)
+
+
+@app.post("/v1/bookings", status_code=status.HTTP_201_CREATED, tags=["bookings"])
+async def create_booking(body: BookingCreate, user: dict = Depends(require_role("owner", "admin", "manager", "staff"))):
+    async with tenant_connection(user) as conn:
+        quote = await conn.fetchrow("SELECT id,total_paise FROM quotes WHERE id=$1 AND business_id=$2 AND status IN ('draft','sent','accepted')", body.quote_id, body.business_id)
+        if not quote:
+            raise HTTPException(status_code=422, detail="Booking requires an active quote in this business")
+        row = await conn.fetchrow("""INSERT INTO bookings(tenant_id,business_id,quote_id,customer_id,vehicle_id,pickup_at,pickup_location,drop_location,total_paise)
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id,status,total_paise,pickup_at,created_at""",
+            user["tenant_id"], body.business_id, body.quote_id, body.customer_id, body.vehicle_id, body.pickup_at, body.pickup_location, body.drop_location, quote["total_paise"])
+    return dict(row)
 
 
 @app.get("/metrics", include_in_schema=False)
