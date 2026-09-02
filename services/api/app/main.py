@@ -144,7 +144,7 @@ class ApprovalDecision(BaseModel):
 class SignupRequest(BaseModel):
     organization_name: str = Field(min_length=2, max_length=120)
     name: str = Field(min_length=2, max_length=120)
-    email: str = Field(pattern=r"^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$")
+    email: str = Field(pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
     password: str = Field(min_length=12, max_length=128)
 
 
@@ -161,7 +161,7 @@ class BusinessCreate(BaseModel):
 class CustomerCreate(BaseModel):
     business_id: UUID
     display_name: str | None = Field(default=None, max_length=120)
-    phone_e164: str | None = Field(default=None, pattern=r"^\\+[1-9][0-9]{7,14}$")
+    phone_e164: str | None = Field(default=None, pattern=r"^\+[1-9][0-9]{7,14}$")
     email: str | None = None
 
 
@@ -348,6 +348,14 @@ async def create_conversation(
     return dict(row)
 
 
+@app.get("/v1/conversations", tags=["conversations"])
+async def list_conversations(business_id: UUID, user: dict = Depends(current_user)):
+    async with tenant_connection(user) as conn:
+        rows = await conn.fetch("""SELECT id,business_id,customer_id,channel,status,language,started_at,closed_at
+            FROM conversations WHERE business_id=$1 ORDER BY started_at DESC LIMIT 100""", business_id)
+    return [dict(row) for row in rows]
+
+
 @app.get("/v1/conversations/{conversation_id}/messages", tags=["conversations"])
 async def list_messages(conversation_id: UUID, user: dict = Depends(current_user)):
     async with tenant_connection(user) as conn:
@@ -398,6 +406,14 @@ async def search_knowledge(business_id: UUID, q: str = Query(min_length=2, max_l
         rows = await conn.fetch("""SELECT id,title,source_type,content,created_at FROM knowledge_sources
             WHERE business_id=$1 AND verification_status='verified' AND content ILIKE '%' || $2 || '%'
             ORDER BY created_at DESC LIMIT 10""", business_id, q)
+    return [dict(row) for row in rows]
+
+
+@app.get("/v1/knowledge-sources", tags=["knowledge"])
+async def list_knowledge_sources(business_id: UUID, user: dict = Depends(current_user)):
+    async with tenant_connection(user) as conn:
+        rows = await conn.fetch("""SELECT id,title,source_type,verification_status,created_at
+            FROM knowledge_sources WHERE business_id=$1 ORDER BY created_at DESC LIMIT 100""", business_id)
     return [dict(row) for row in rows]
 
 
@@ -537,6 +553,13 @@ async def create_business(body: BusinessCreate, user: dict = Depends(require_rol
     return dict(row)
 
 
+@app.get("/v1/businesses", tags=["businesses"])
+async def list_businesses(user: dict = Depends(current_user)):
+    async with tenant_connection(user) as conn:
+        rows = await conn.fetch("SELECT id,name,timezone,primary_language,created_at FROM businesses ORDER BY created_at DESC")
+    return [dict(row) for row in rows]
+
+
 @app.post("/v1/customers", status_code=status.HTTP_201_CREATED, tags=["customers"])
 async def create_customer(body: CustomerCreate, user: dict = Depends(require_role("owner", "admin", "manager", "staff"))):
     async with tenant_connection(user) as conn:
@@ -544,6 +567,14 @@ async def create_customer(body: CustomerCreate, user: dict = Depends(require_rol
             VALUES($1,$2,$3,$4,$5) RETURNING id,business_id,display_name,phone_e164,email,created_at""",
             user["tenant_id"], body.business_id, body.display_name, body.phone_e164, body.email)
     return dict(row)
+
+
+@app.get("/v1/customers", tags=["customers"])
+async def list_customers(business_id: UUID, user: dict = Depends(current_user)):
+    async with tenant_connection(user) as conn:
+        rows = await conn.fetch("""SELECT id,display_name,phone_e164,email,language_preference,created_at
+            FROM customers WHERE business_id=$1 ORDER BY created_at DESC LIMIT 100""", business_id)
+    return [dict(row) for row in rows]
 
 
 @app.post("/v1/leads", status_code=status.HTTP_201_CREATED, tags=["leads"])
@@ -555,6 +586,14 @@ async def create_lead(body: LeadCreate, user: dict = Depends(require_role("owner
     return dict(row)
 
 
+@app.get("/v1/leads", tags=["leads"])
+async def list_leads(business_id: UUID, user: dict = Depends(current_user)):
+    async with tenant_connection(user) as conn:
+        rows = await conn.fetch("""SELECT id,customer_id,status,source,notes,created_at
+            FROM leads WHERE business_id=$1 ORDER BY created_at DESC LIMIT 100""", business_id)
+    return [dict(row) for row in rows]
+
+
 @app.post("/v1/services", status_code=status.HTTP_201_CREATED, tags=["services"])
 async def create_service(body: ServiceCreate, user: dict = Depends(require_role("owner", "admin", "manager"))):
     async with tenant_connection(user) as conn:
@@ -564,6 +603,14 @@ async def create_service(body: ServiceCreate, user: dict = Depends(require_role(
     return dict(row)
 
 
+@app.get("/v1/services", tags=["services"])
+async def list_services(business_id: UUID, user: dict = Depends(current_user)):
+    async with tenant_connection(user) as conn:
+        rows = await conn.fetch("""SELECT id,name,unit_price_paise,active,created_at
+            FROM services WHERE business_id=$1 ORDER BY created_at DESC LIMIT 100""", business_id)
+    return [dict(row) for row in rows]
+
+
 @app.post("/v1/vehicles", status_code=status.HTTP_201_CREATED, tags=["vehicles"])
 async def create_vehicle(body: VehicleCreate, user: dict = Depends(require_role("owner", "admin", "manager"))):
     async with tenant_connection(user) as conn:
@@ -571,6 +618,14 @@ async def create_vehicle(body: VehicleCreate, user: dict = Depends(require_role(
             VALUES($1,$2,$3,$4,$5) RETURNING id,registration_number,vehicle_type,seats,status,created_at""",
             user["tenant_id"], body.business_id, body.registration_number.upper(), body.vehicle_type, body.seats)
     return dict(row)
+
+
+@app.get("/v1/vehicles", tags=["vehicles"])
+async def list_vehicles(business_id: UUID, user: dict = Depends(current_user)):
+    async with tenant_connection(user) as conn:
+        rows = await conn.fetch("""SELECT id,registration_number,vehicle_type,seats,status,created_at
+            FROM vehicles WHERE business_id=$1 ORDER BY created_at DESC LIMIT 100""", business_id)
+    return [dict(row) for row in rows]
 
 
 @app.post("/v1/quotes", status_code=status.HTTP_201_CREATED, tags=["quotes"])
@@ -592,6 +647,14 @@ async def create_quote(body: QuoteCreate, user: dict = Depends(require_role("own
     return dict(quote)
 
 
+@app.get("/v1/quotes", tags=["quotes"])
+async def list_quotes(business_id: UUID, user: dict = Depends(current_user)):
+    async with tenant_connection(user) as conn:
+        rows = await conn.fetch("""SELECT id,customer_id,lead_id,total_paise,currency,status,created_at
+            FROM quotes WHERE business_id=$1 ORDER BY created_at DESC LIMIT 100""", business_id)
+    return [dict(row) for row in rows]
+
+
 @app.post("/v1/bookings", status_code=status.HTTP_201_CREATED, tags=["bookings"])
 async def create_booking(body: BookingCreate, user: dict = Depends(require_role("owner", "admin", "manager", "staff"))):
     async with tenant_connection(user) as conn:
@@ -602,6 +665,14 @@ async def create_booking(body: BookingCreate, user: dict = Depends(require_role(
             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id,status,total_paise,pickup_at,created_at""",
             user["tenant_id"], body.business_id, body.quote_id, body.customer_id, body.vehicle_id, body.pickup_at, body.pickup_location, body.drop_location, quote["total_paise"])
     return dict(row)
+
+
+@app.get("/v1/bookings", tags=["bookings"])
+async def list_bookings(business_id: UUID, user: dict = Depends(current_user)):
+    async with tenant_connection(user) as conn:
+        rows = await conn.fetch("""SELECT id,quote_id,customer_id,vehicle_id,pickup_at,pickup_location,drop_location,status,total_paise,created_at
+            FROM bookings WHERE business_id=$1 ORDER BY pickup_at DESC LIMIT 100""", business_id)
+    return [dict(row) for row in rows]
 
 
 @app.get("/metrics", include_in_schema=False)
