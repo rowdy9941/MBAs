@@ -30,7 +30,11 @@ def test_invalid_token_is_rejected():
     assert error.value.status_code == 401
 
 
-@pytest.mark.parametrize("path", ["/v1/businesses", "/v1/customers", "/v1/leads", "/v1/vehicles", "/v1/services", "/v1/quotes", "/v1/bookings"])
+@pytest.mark.parametrize("path", ["/v1/businesses", "/v1/customers", "/v1/leads", "/v1/vehicles", "/v1/services", "/v1/quotes", "/v1/bookings", "/v1/tools"])
 def test_business_operations_require_authentication(path):
     response = TestClient(app).post(path, json={})
     assert response.status_code == 401
+
+
+def test_pending_actions_requires_authentication():
+    assert TestClient(app).get("/v1/actions/pending").status_code == 401

@@ -114,6 +114,18 @@ class ActionRequestCreate(BaseModel):
     action_name: str = Field(pattern=r"^[a-z][a-z0-9_.-]{2,100}$")
     payload: dict
     requested_by: str = "agent:mani"
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=128)
+
+
+class ToolDefinitionCreate(BaseModel):
+    name: str = Field(pattern=r"^[a-z][a-z0-9_.-]{2,100}$")
+    risk_level: Literal["green", "yellow", "red"]
+    input_schema: dict = Field(default_factory=dict)
+
+
+class ApprovalDecision(BaseModel):
+    decision: Literal["approved", "rejected"]
+    note: str | None = Field(default=None, max_length=1000)
 
 
 class SignupRequest(BaseModel):
@@ -276,16 +288,22 @@ async def request_action(
     user: dict = Depends(require_role("owner", "admin", "manager", "staff")),
 ):
     current_tenant = user["tenant_id"]
-    risk_level = RISK_LEVELS.get(body.action_name, "yellow")
-    action_status = "approved" if risk_level == "green" else "pending"
     async with tenant_connection(user) as conn:
+        if body.idempotency_key:
+            existing = await conn.fetchrow("""SELECT id,action_name,risk_level,status,created_at FROM action_requests
+                WHERE tenant_id=$1 AND idempotency_key=$2""", current_tenant, body.idempotency_key)
+            if existing:
+                return {**dict(existing), "requires_human_approval": existing["risk_level"] != "green", "idempotent_replay": True}
+        tool = await conn.fetchrow("SELECT risk_level FROM tool_definitions WHERE name=$1 AND enabled ORDER BY version DESC LIMIT 1", body.action_name)
+        risk_level = tool["risk_level"] if tool else RISK_LEVELS.get(body.action_name, "yellow")
+        action_status = "approved" if risk_level == "green" else "pending"
         row = await conn.fetchrow(
             """INSERT INTO action_requests
-            (tenant_id, business_id, conversation_id, action_name, risk_level, status, payload, requested_by)
-            VALUES($1,$2,$3,$4,$5,$6,$7,$8)
+            (tenant_id, business_id, conversation_id, action_name, risk_level, status, payload, requested_by, idempotency_key)
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
             RETURNING id, action_name, risk_level, status, created_at""",
             current_tenant, body.business_id, body.conversation_id, body.action_name,
-            risk_level, action_status, body.payload, body.requested_by,
+            risk_level, action_status, body.payload, f"user:{user['user_id']}", body.idempotency_key,
         )
         await conn.execute(
             """INSERT INTO audit_events(tenant_id, actor_type, actor_id, event_type, entity_type, entity_id, payload)
@@ -296,6 +314,42 @@ async def request_action(
             json.dumps({"action": body.action_name, "risk": risk_level}),
         )
     return {**dict(row), "requires_human_approval": risk_level != "green"}
+
+
+@app.post("/v1/tools", status_code=status.HTTP_201_CREATED, tags=["tools"])
+async def create_tool(body: ToolDefinitionCreate, user: dict = Depends(require_role("owner", "admin"))):
+    async with tenant_connection(user) as conn:
+        row = await conn.fetchrow("""INSERT INTO tool_definitions(tenant_id,name,risk_level,input_schema)
+            VALUES($1,$2,$3,$4) RETURNING id,name,version,risk_level,enabled,created_at""",
+            user["tenant_id"], body.name, body.risk_level, json.dumps(body.input_schema))
+    return dict(row)
+
+
+@app.get("/v1/actions/pending", tags=["actions"])
+async def pending_actions(user: dict = Depends(require_role("owner", "admin", "manager"))):
+    async with tenant_connection(user) as conn:
+        rows = await conn.fetch("""SELECT id,action_name,risk_level,status,payload,requested_by,created_at
+            FROM action_requests WHERE status='pending' ORDER BY created_at""")
+    return [dict(row) for row in rows]
+
+
+@app.post("/v1/actions/{action_id}/approval", tags=["actions"])
+async def decide_action(action_id: UUID, body: ApprovalDecision, user: dict = Depends(require_role("owner", "admin", "manager"))):
+    async with tenant_connection(user) as conn:
+        action = await conn.fetchrow("SELECT id,risk_level,status FROM action_requests WHERE id=$1", action_id)
+        if not action or action["status"] != "pending":
+            raise HTTPException(status_code=409, detail="Action is not awaiting approval")
+        if action["risk_level"] == "red" and user["role"] not in ("owner", "admin"):
+            raise HTTPException(status_code=403, detail="Red actions require owner or admin approval")
+        await conn.execute("""INSERT INTO action_approvals(action_request_id,tenant_id,approver_id,decision,note)
+            VALUES($1,$2,$3,$4,$5)""", action_id, user["tenant_id"], user["user_id"], body.decision, body.note)
+        row = await conn.fetchrow("""UPDATE action_requests SET status=$2,approved_by=$3 WHERE id=$1
+            RETURNING id,action_name,risk_level,status,approved_by""", action_id,
+            "approved" if body.decision == "approved" else "rejected", str(user["user_id"]))
+        await conn.execute("""INSERT INTO audit_events(tenant_id,actor_type,actor_id,event_type,entity_type,entity_id,payload)
+            VALUES($1,'human',$2,$3,'action_request',$4,$5)""", user["tenant_id"], str(user["user_id"]),
+            f"action.{body.decision}", str(action_id), json.dumps({"risk_level": action["risk_level"]}))
+    return dict(row)
 
 
 @app.post("/v1/businesses", status_code=status.HTTP_201_CREATED, tags=["businesses"])
