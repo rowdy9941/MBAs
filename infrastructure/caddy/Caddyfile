@@ -1,0 +1,10 @@
+{$MBAS_DOMAIN} {
+  encode zstd gzip
+  reverse_proxy dashboard:3000
+}
+
+{$MBAS_API_DOMAIN} {
+  encode zstd gzip
+  reverse_proxy api:8000
+}
+
