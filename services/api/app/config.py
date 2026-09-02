@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     mbas_log_level: str = "INFO"
     mbas_cors_origins: str = "http://localhost:3000"
     database_url: str = "postgresql://mbas:mbas@postgres:5432/mbas"
+    auth_secret: str = "development-only-change-me"
 
     @property
     def cors_origins(self) -> list[str]:
