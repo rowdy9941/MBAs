@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import asyncio
 from datetime import UTC, datetime
 import json
 import hashlib
@@ -50,7 +51,16 @@ log = logging.getLogger("mbas.api")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=10)
+    last_error = None
+    for _ in range(15):
+        try:
+            app.state.pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=10)
+            break
+        except OSError as error:
+            last_error = error
+            await asyncio.sleep(2)
+    else:
+        raise last_error or RuntimeError("Database connection failed")
     yield
     await app.state.pool.close()
 

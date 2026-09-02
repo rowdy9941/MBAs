@@ -26,9 +26,9 @@ fi
 docker compose pull
 docker compose up -d --build --remove-orphans
 for attempt in {1..30}; do
-  if curl -fsS http://127.0.0.1:8000/healthz >/dev/null 2>&1; then break; fi
+  if docker compose exec -T api python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz', timeout=3)" >/dev/null 2>&1; then break; fi
   sleep 2
 done
-curl -fsS http://127.0.0.1:8000/readyz >/dev/null
+docker compose exec -T api python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/readyz', timeout=3)" >/dev/null
 docker compose ps
 echo "MBAs is running. Configure DNS for MBAS_DOMAIN and MBAS_API_DOMAIN, then verify HTTPS."
