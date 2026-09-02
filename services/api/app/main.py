@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 import asyncpg
 from fastapi import FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app.config import settings
@@ -26,6 +27,8 @@ class JsonFormatter(logging.Formatter):
         for field in ("correlation_id", "method", "path", "status_code", "duration_ms"):
             if hasattr(record, field):
                 event[field] = getattr(record, field)
+        if record.exc_info:
+            event["exception"] = self.formatException(record.exc_info)
         return json.dumps(event, separators=(",", ":"))
 
 
@@ -69,7 +72,7 @@ async def request_context(request: Request, call_next):
         log.exception("request.failed", extra={
             "correlation_id": correlation_id, "method": request.method, "path": request.url.path,
         })
-        raise
+        response = JSONResponse(status_code=500, content={"detail": "Internal server error"})
     response.headers["X-Correlation-ID"] = correlation_id
     log.info("request.completed", extra={
         "correlation_id": correlation_id,

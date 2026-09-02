@@ -1,5 +1,6 @@
 import json
 import logging
+import sys
 
 from fastapi.testclient import TestClient
 
@@ -42,3 +43,29 @@ def test_json_formatter_includes_request_context():
     assert payload["timestamp"].endswith("Z")
     assert payload["correlation_id"] == "abc"
     assert payload["status_code"] == 200
+
+
+def test_json_formatter_preserves_exception_details():
+    try:
+        raise RuntimeError("diagnostic failure")
+    except RuntimeError:
+        record = logging.LogRecord(
+            "mbas.api", logging.ERROR, __file__, 1, "request.failed", (), sys.exc_info(),
+        )
+
+    payload = json.loads(JsonFormatter().format(record))
+    assert "RuntimeError: diagnostic failure" in payload["exception"]
+
+
+def test_failed_response_includes_correlation_id():
+    path = "/_test/unhandled-error"
+
+    async def fail():
+        raise RuntimeError("must not leak")
+
+    app.add_api_route(path, fail, methods=["GET"])
+    response = client_without_lifespan().get(path, headers={"X-Correlation-ID": "failed-request-123"})
+
+    assert response.status_code == 500
+    assert response.headers["X-Correlation-ID"] == "failed-request-123"
+    assert response.json() == {"detail": "Internal server error"}
