@@ -12,6 +12,8 @@ Start with a Hostinger KVM 8-class Ubuntu 24.04 VPS in the nearest Indian region
 4. Clone this repository, copy `.env.example` to `.env`, and replace all sample secrets.
 5. Configure a real mailbox for Caddy's ACME certificate notices.
 
+Phase 0 stops before production deployment. Before any later approved deployment, generate unique database credentials, keep `.env` outside version control, restrict SSH, enable the host firewall and unattended security updates, arrange encrypted off-server backups, and complete the Phase 1 authentication/RLS work. The placeholder API is not safe for public business data.
+
 ## Start
 
 ```bash
@@ -19,7 +21,10 @@ docker compose pull
 docker compose up -d --build
 docker compose ps
 curl -fsS https://api.mbas.example.com/healthz
+curl -fsS https://api.mbas.example.com/readyz
 ```
+
+Use only the base `compose.yaml` on the VPS. `compose.dev.yaml` is a local-development overlay that binds the API and dashboard to `127.0.0.1`; it is not part of the production command above.
 
 To enable the monitoring containers, use `docker compose --profile monitoring up -d` and expose Grafana only through authenticated private access or a VPN.
 
@@ -30,4 +35,3 @@ Run a daily encrypted PostgreSQL dump to an off-server object store. Test restor
 ## Before LiveKit / phone calls
 
 Choose the Indian SIP provider, reserve the required RTP/SIP/TURN ports, add a TURN server, configure recording retention and obtain the customer's consent script. Telephony credentials belong in the secret store, never in source code or prompts.
-

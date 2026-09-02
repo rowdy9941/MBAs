@@ -31,11 +31,30 @@ Phone / WhatsApp / Web
 ## Local start
 
 ```bash
-cp .env.example .env
-docker compose up --build
+make install
+make dev
 ```
 
 Open `http://localhost:3000` for the dashboard and `http://localhost:8000/docs` for the API.
+
+The development overlay binds the dashboard and API to the loopback interface only. The base, deployment-oriented Compose stack publishes only Caddy on ports 80/443. Common development commands are:
+
+```bash
+make setup          # create .env without overwriting an existing file
+make install        # install locked frontend and backend development dependencies
+make dev            # build and start the Compose stack
+make check          # backend tests, frontend tests, Compose validation
+make logs           # follow service logs
+make down           # stop the stack
+```
+
+The API exposes `/healthz` for process liveness and `/readyz` for database readiness. Every HTTP response includes `X-Correlation-ID`; callers may supply that header to preserve an identifier across services. Application request logs are structured JSON.
+
+## Phase boundaries
+
+This change implements the Phase 0 foundation only. Authentication, tenant enforcement/RLS policies, car-travel operations, guarded workflow execution, agent runtime, web chat, WhatsApp, payments, LiveKit/SIP, and voice are later phases and must arrive in separate reviewed pull requests. Existing schema and API placeholders are not production-ready authorization boundaries.
+
+See [ADR 0001](docs/adr/0001-hostinger-compose-foundation.md) for the accepted Hostinger-first deployment decision and [the deployment runbook](docs/hostinger-deployment.md) for manual host preparation. No production deployment is performed by the development workflow.
 
 ## Hostinger deployment
 
@@ -63,4 +82,3 @@ docs                    Architecture and deployment operations
 2. Add LiveKit + SIP and Sarvam streaming speech adapters.
 3. Add the agent runtime, knowledge ingestion and evaluation suite.
 4. Add subscription metering, tenant onboarding and industry templates.
-

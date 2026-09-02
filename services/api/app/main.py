@@ -1,14 +1,44 @@
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 import json
+import logging
+import sys
+import time
 from typing import Literal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import asyncpg
-from fastapi import FastAPI, Header, HTTPException, Response, status
+from fastapi import FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from app.config import settings
+
+
+class JsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        event = {
+            "timestamp": datetime.fromtimestamp(record.created, UTC).isoformat().replace("+00:00", "Z"),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        for field in ("correlation_id", "method", "path", "status_code", "duration_ms"):
+            if hasattr(record, field):
+                event[field] = getattr(record, field)
+        return json.dumps(event, separators=(",", ":"))
+
+
+def configure_logging() -> None:
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(JsonFormatter())
+    root = logging.getLogger()
+    root.handlers = [handler]
+    root.setLevel(settings.mbas_log_level.upper())
+
+
+configure_logging()
+log = logging.getLogger("mbas.api")
 
 
 @asynccontextmanager
@@ -21,11 +51,34 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="MBAs API", version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[item.strip() for item in settings.mbas_cors_origins.split(",")],
+    allow_origins=settings.cors_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST"],
-    allow_headers=["Authorization", "Content-Type", "X-Tenant-ID"],
+    allow_headers=["Authorization", "Content-Type", "X-Tenant-ID", "X-Correlation-ID"],
+    expose_headers=["X-Correlation-ID"],
 )
+
+
+@app.middleware("http")
+async def request_context(request: Request, call_next):
+    correlation_id = request.headers.get("X-Correlation-ID") or str(uuid4())
+    started = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        log.exception("request.failed", extra={
+            "correlation_id": correlation_id, "method": request.method, "path": request.url.path,
+        })
+        raise
+    response.headers["X-Correlation-ID"] = correlation_id
+    log.info("request.completed", extra={
+        "correlation_id": correlation_id,
+        "method": request.method,
+        "path": request.url.path,
+        "status_code": response.status_code,
+        "duration_ms": round((time.perf_counter() - started) * 1000, 2),
+    })
+    return response
 
 
 class TenantCreate(BaseModel):
@@ -71,6 +124,11 @@ def tenant_id(value: str | None) -> UUID:
 
 @app.get("/healthz", tags=["system"])
 async def healthz():
+    return {"status": "ok", "service": "mbas-api", "environment": settings.mbas_env}
+
+
+@app.get("/readyz", tags=["system"])
+async def readyz():
     async with app.state.pool.acquire() as conn:
         await conn.fetchval("SELECT 1")
     return {"status": "ok", "service": "mbas-api", "environment": settings.mbas_env}

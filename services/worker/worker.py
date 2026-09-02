@@ -1,11 +1,28 @@
 import asyncio
+from datetime import UTC, datetime
+import json
 import logging
 import os
 
 from redis.asyncio import Redis
 
 
-logging.basicConfig(level=os.getenv("MBAS_LOG_LEVEL", "INFO"))
+class JsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        event = {
+            "timestamp": datetime.fromtimestamp(record.created, UTC).isoformat().replace("+00:00", "Z"),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        if hasattr(record, "payload_size"):
+            event["payload_size"] = record.payload_size
+        return json.dumps(event, separators=(",", ":"))
+
+
+handler = logging.StreamHandler()
+handler.setFormatter(JsonFormatter())
+logging.basicConfig(level=os.getenv("MBAS_LOG_LEVEL", "INFO"), handlers=[handler])
 log = logging.getLogger("mbas.worker")
 
 
@@ -18,11 +35,10 @@ async def main() -> None:
             if job:
                 _, payload = job
                 # Future jobs: knowledge ingestion, follow-ups, provider retries, evaluation runs.
-                log.info("Received job: %s", payload)
+                log.info("Job received", extra={"payload_size": len(payload)})
     finally:
         await redis.aclose()
 
 
 if __name__ == "__main__":
     asyncio.run(main())
-
