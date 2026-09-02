@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     mbas_cors_origins: str = "http://localhost:3000"
     database_url: str = "postgresql://mbas:mbas@postgres:5432/mbas"
     auth_secret: str = "development-only-change-me"
+    whatsapp_verify_token: str = "development-verify-token"
+    whatsapp_app_secret: str = "development-app-secret"
 
     @property
     def cors_origins(self) -> list[str]:

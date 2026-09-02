@@ -1,6 +1,8 @@
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 import json
+import hashlib
+import hmac
 import logging
 import sys
 import time
@@ -8,7 +10,7 @@ from typing import Literal
 from uuid import UUID, uuid4
 
 import asyncpg
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -199,6 +201,19 @@ class MessageCreate(BaseModel):
     language: str | None = Field(default=None, max_length=16)
 
 
+class KnowledgeSourceCreate(BaseModel):
+    business_id: UUID
+    title: str = Field(min_length=2, max_length=200)
+    source_type: Literal["faq", "document", "website", "spreadsheet"]
+    content: str = Field(min_length=1, max_length=100_000)
+
+
+class ChannelEndpointCreate(BaseModel):
+    business_id: UUID
+    provider: Literal["whatsapp"]
+    external_id: str = Field(min_length=1, max_length=120)
+
+
 def deterministic_agent_reply(content: str, language: str | None) -> str:
     normalized = content.lower()
     if any(word in normalized for word in ("price", "quote", "fare", "rate")):
@@ -208,6 +223,13 @@ def deterministic_agent_reply(content: str, language: str | None) -> str:
     if language and language.startswith("te"):
         return "మీ ప్రయాణ వివరాలు చెప్పండి. నేను అందుబాటులో ఉన్న వాహనం మరియు ధృవీకరించిన ధరలో సహాయం చేస్తాను."
     return "Welcome to MBAs. I can help with travel availability, verified quotes and bookings."
+
+
+def valid_whatsapp_signature(payload: bytes, signature: str | None) -> bool:
+    if not signature or not signature.startswith("sha256="):
+        return False
+    expected = hmac.new(settings.whatsapp_app_secret.encode(), payload, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(signature[7:], expected)
 
 
 RISK_LEVELS = {
@@ -321,6 +343,76 @@ async def send_message(conversation_id: UUID, body: MessageCreate, user: dict = 
             VALUES($1,$2,'agent',$3,$4) RETURNING id,sender_type,content,language,created_at""",
             user["tenant_id"], conversation_id, reply, language)
     return {"customer_message": dict(customer), "agent_message": dict(agent)}
+
+
+@app.post("/v1/knowledge-sources", status_code=status.HTTP_201_CREATED, tags=["knowledge"])
+async def create_knowledge_source(body: KnowledgeSourceCreate, user: dict = Depends(require_role("owner", "admin", "manager"))):
+    async with tenant_connection(user) as conn:
+        row = await conn.fetchrow("""INSERT INTO knowledge_sources(tenant_id,business_id,title,source_type,content)
+            VALUES($1,$2,$3,$4,$5) RETURNING id,title,source_type,verification_status,created_at""",
+            user["tenant_id"], body.business_id, body.title, body.source_type, body.content)
+    return dict(row)
+
+
+@app.post("/v1/knowledge-sources/{source_id}/verify", tags=["knowledge"])
+async def verify_knowledge_source(source_id: UUID, user: dict = Depends(require_role("owner", "admin", "manager"))):
+    async with tenant_connection(user) as conn:
+        row = await conn.fetchrow("""UPDATE knowledge_sources SET verification_status='verified' WHERE id=$1
+            RETURNING id,title,verification_status""", source_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Knowledge source not found")
+    return dict(row)
+
+
+@app.get("/v1/knowledge/search", tags=["knowledge"])
+async def search_knowledge(business_id: UUID, q: str = Query(min_length=2, max_length=200), user: dict = Depends(current_user)):
+    async with tenant_connection(user) as conn:
+        rows = await conn.fetch("""SELECT id,title,source_type,content,created_at FROM knowledge_sources
+            WHERE business_id=$1 AND verification_status='verified' AND content ILIKE '%' || $2 || '%'
+            ORDER BY created_at DESC LIMIT 10""", business_id, q)
+    return [dict(row) for row in rows]
+
+
+@app.post("/v1/channel-endpoints", status_code=status.HTTP_201_CREATED, tags=["channels"])
+async def create_channel_endpoint(body: ChannelEndpointCreate, user: dict = Depends(require_role("owner", "admin"))):
+    async with tenant_connection(user) as conn:
+        row = await conn.fetchrow("""INSERT INTO channel_endpoints(tenant_id,business_id,provider,external_id)
+            VALUES($1,$2,$3,$4) RETURNING id,provider,external_id,created_at""",
+            user["tenant_id"], body.business_id, body.provider, body.external_id)
+    return dict(row)
+
+
+@app.get("/v1/webhooks/whatsapp", include_in_schema=False)
+async def verify_whatsapp_webhook(mode: str = Query(alias="hub.mode"), token: str = Query(alias="hub.verify_token"), challenge: str = Query(alias="hub.challenge")):
+    if mode != "subscribe" or not hmac.compare_digest(token, settings.whatsapp_verify_token):
+        raise HTTPException(status_code=403, detail="Webhook verification failed")
+    return Response(content=challenge, media_type="text/plain")
+
+
+@app.post("/v1/webhooks/whatsapp", status_code=status.HTTP_202_ACCEPTED, include_in_schema=False)
+async def receive_whatsapp_webhook(request: Request, x_hub_signature_256: str | None = Header(default=None)):
+    raw = await request.body()
+    if not valid_whatsapp_signature(raw, x_hub_signature_256):
+        raise HTTPException(status_code=401, detail="Invalid webhook signature")
+    payload = json.loads(raw)
+    try:
+        value = payload["entry"][0]["changes"][0]["value"]
+        external_id = value["metadata"]["phone_number_id"]
+        event_id = value["messages"][0]["id"]
+    except (KeyError, IndexError, TypeError):
+        return {"accepted": True, "ignored": "unsupported event"}
+    async with app.state.pool.acquire() as conn:
+        endpoint = await conn.fetchrow("SELECT * FROM resolve_channel_endpoint('whatsapp', $1)", external_id)
+        if not endpoint:
+            return {"accepted": True, "ignored": "unknown endpoint"}
+        async with conn.transaction():
+            await conn.execute("SELECT set_config('app.tenant_id', $1, true)", str(endpoint["tenant_id"]))
+            try:
+                await conn.execute("""INSERT INTO inbound_events(tenant_id,business_id,provider,provider_event_id,payload)
+                    VALUES($1,$2,'whatsapp',$3,$4)""", endpoint["tenant_id"], endpoint["business_id"], event_id, json.dumps(payload))
+            except asyncpg.UniqueViolationError:
+                return {"accepted": True, "duplicate": True}
+    return {"accepted": True}
 
 
 @app.post("/v1/actions", status_code=status.HTTP_201_CREATED, tags=["actions"])
