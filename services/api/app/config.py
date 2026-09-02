@@ -9,6 +9,9 @@ class Settings(BaseSettings):
     mbas_cors_origins: str = "http://localhost:3000"
     database_url: str = "postgresql://mbas:mbas@postgres:5432/mbas"
 
+    @property
+    def cors_origins(self) -> list[str]:
+        return [origin.strip() for origin in self.mbas_cors_origins.split(",") if origin.strip()]
+
 
 settings = Settings()
-
