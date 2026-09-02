@@ -16,6 +16,7 @@ services:
       - ./db/migrations/004_guarded_actions.sql:/docker-entrypoint-initdb.d/004_guarded_actions.sql:ro
       - ./db/migrations/005_conversation_messages.sql:/docker-entrypoint-initdb.d/005_conversation_messages.sql:ro
       - ./db/migrations/006_knowledge_and_channels.sql:/docker-entrypoint-initdb.d/006_knowledge_and_channels.sql:ro
+      - ./db/migrations/007_voice_sessions.sql:/docker-entrypoint-initdb.d/007_voice_sessions.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 10s

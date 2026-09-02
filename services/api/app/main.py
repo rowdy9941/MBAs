@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.auth import current_user, hash_password, issue_token, require_role, verify_password
+from app.voice import MockVoiceProvider
 
 
 class JsonFormatter(logging.Formatter):
@@ -212,6 +213,13 @@ class ChannelEndpointCreate(BaseModel):
     business_id: UUID
     provider: Literal["whatsapp"]
     external_id: str = Field(min_length=1, max_length=120)
+
+
+class VoiceSessionCreate(BaseModel):
+    business_id: UUID
+    conversation_id: UUID | None = None
+    language: str = Field(default="en-IN", pattern=r"^[a-z]{2}-[A-Z]{2}$")
+    recording_consent: bool = False
 
 
 def deterministic_agent_reply(content: str, language: str | None) -> str:
@@ -413,6 +421,22 @@ async def receive_whatsapp_webhook(request: Request, x_hub_signature_256: str | 
             except asyncpg.UniqueViolationError:
                 return {"accepted": True, "duplicate": True}
     return {"accepted": True}
+
+
+@app.post("/v1/voice/sessions", status_code=status.HTTP_201_CREATED, tags=["voice"])
+async def create_voice_session(body: VoiceSessionCreate, user: dict = Depends(require_role("owner", "admin", "manager", "staff"))):
+    provider = MockVoiceProvider()
+    async with tenant_connection(user) as conn:
+        row = await conn.fetchrow("""INSERT INTO voice_sessions(tenant_id,business_id,conversation_id,provider,language,recording_consent)
+            VALUES($1,$2,$3,$4,$5,$6) RETURNING id,provider,language,status,recording_consent,created_at""",
+            user["tenant_id"], body.business_id, body.conversation_id, provider.name, body.language, body.recording_consent)
+    return dict(row)
+
+
+@app.post("/v1/voice/transcribe", tags=["voice"])
+async def mock_transcribe(text_hint: str = Query(min_length=1, max_length=4000), language: str = Query(default="en-IN"), user: dict = Depends(current_user)):
+    result = MockVoiceProvider().transcribe(text_hint, language)
+    return {"text": result.text, "language": result.language, "provider": result.provider}
 
 
 @app.post("/v1/actions", status_code=status.HTTP_201_CREATED, tags=["actions"])
