@@ -273,6 +273,16 @@ async def readyz():
     return {"status": "ok", "service": "mbas-api", "environment": settings.mbas_env}
 
 
+@app.get("/v1/provider-health", tags=["system"])
+async def provider_health():
+    providers = {
+        "sarvam": bool(settings.sarvam_api_key),
+        "whatsapp": bool(settings.whatsapp_app_secret and settings.whatsapp_verify_token),
+        "livekit": bool(settings.livekit_api_key and settings.livekit_api_secret and settings.livekit_url),
+    }
+    return {"status": "ok", "providers": providers}
+
+
 @app.post("/v1/tenants", status_code=status.HTTP_201_CREATED, tags=["tenants"])
 async def create_tenant(body: TenantCreate):
     async with app.state.pool.acquire() as conn:

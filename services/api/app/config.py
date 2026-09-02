@@ -11,6 +11,10 @@ class Settings(BaseSettings):
     auth_secret: str = "development-only-change-me"
     whatsapp_verify_token: str = "development-verify-token"
     whatsapp_app_secret: str = "development-app-secret"
+    sarvam_api_key: str = ""
+    livekit_api_key: str = ""
+    livekit_api_secret: str = ""
+    livekit_url: str = ""
 
     @property
     def cors_origins(self) -> list[str]:
